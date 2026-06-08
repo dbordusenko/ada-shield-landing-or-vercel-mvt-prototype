@@ -1,0 +1,17 @@
+{
+  "name": "agent-market-site",
+  "version": "1.0.0",
+  "description": "Multi-agent forum monitor that generates and validates AI agent product ideas",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
