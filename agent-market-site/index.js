@@ -5,10 +5,50 @@ const app = express();
 app.use(express.json());
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// ─── Telegram ─────────────────────────────────────────────────────────────────
+
+async function sendTelegram(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.log('[telegram] Skipped — no credentials set');
+    return;
+  }
+  const chunks = splitMessage(text);
+  for (const chunk of chunks) {
+    try {
+      const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHAT_ID,
+          text: chunk,
+          parse_mode: 'Markdown',
+        }),
+      });
+    } catch (err) {
+      console.error('[telegram] Send error:', err.message);
+    }
+  }
+}
+
+// Telegram has 4096 char limit per message
+function splitMessage(text, limit = 4000) {
+  const parts = [];
+  while (text.length > limit) {
+    const cut = text.lastIndexOf('\n', limit);
+    parts.push(text.slice(0, cut > 0 ? cut : limit));
+    text = text.slice(cut > 0 ? cut : limit);
+  }
+  parts.push(text);
+  return parts;
+}
 
 // ─── Forum Scraper Agent ──────────────────────────────────────────────────────
 
-async function forumScraperAgent(topic = 'automation software tools') {
+async function forumScraperAgent(topic = 'construction finance automation') {
   const sources = await Promise.all([
     scrapeReddit(topic),
     scrapeHackerNews(topic),
@@ -19,7 +59,7 @@ async function forumScraperAgent(topic = 'automation software tools') {
 }
 
 async function scrapeReddit(topic) {
-  const subs = ['entrepreneur', 'SaaS', 'smallbusiness', 'startups', 'Accounting'];
+  const subs = ['entrepreneur', 'SaaS', 'smallbusiness', 'startups', 'Accounting', 'construction'];
   const posts = [];
   for (const sub of subs) {
     try {
@@ -28,14 +68,7 @@ async function scrapeReddit(topic) {
       const json = await res.json();
       for (const item of (json?.data?.children ?? [])) {
         const d = item.data;
-        posts.push({
-          source: 'reddit',
-          title: d.title,
-          text: d.selftext?.slice(0, 600) || '',
-          score: d.score,
-          comments: d.num_comments,
-          url: `https://reddit.com${d.permalink}`,
-        });
+        posts.push({ source: 'reddit', title: d.title, text: d.selftext?.slice(0, 600) || '', score: d.score, comments: d.num_comments });
       }
     } catch (_) {}
   }
@@ -44,109 +77,73 @@ async function scrapeReddit(topic) {
 
 async function scrapeHackerNews(topic) {
   try {
-    const url = `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(topic)}&tags=story&hitsPerPage=15`;
-    const res = await fetch(url);
+    const res = await fetch(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(topic)}&tags=story&hitsPerPage=15`);
     const json = await res.json();
-    return (json.hits ?? []).map(h => ({
-      source: 'hackernews',
-      title: h.title,
-      text: h.story_text?.slice(0, 600) || '',
-      score: h.points,
-      comments: h.num_comments,
-      url: h.url || `https://news.ycombinator.com/item?id=${h.objectID}`,
-    }));
+    return (json.hits ?? []).map(h => ({ source: 'hackernews', title: h.title, text: h.story_text?.slice(0, 600) || '', score: h.points, comments: h.num_comments }));
   } catch (_) { return []; }
 }
 
 async function scrapeHackerNewsAsk(topic) {
   try {
-    const url = `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(topic)}&tags=ask_hn&hitsPerPage=10`;
-    const res = await fetch(url);
+    const res = await fetch(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(topic)}&tags=ask_hn&hitsPerPage=10`);
     const json = await res.json();
-    return (json.hits ?? []).map(h => ({
-      source: 'hackernewsask',
-      title: h.title,
-      text: h.story_text?.slice(0, 600) || '',
-      score: h.points,
-      comments: h.num_comments,
-      url: `https://news.ycombinator.com/item?id=${h.objectID}`,
-    }));
+    return (json.hits ?? []).map(h => ({ source: 'hackernewsask', title: h.title, text: h.story_text?.slice(0, 600) || '', score: h.points, comments: h.num_comments }));
   } catch (_) { return []; }
 }
 
 async function scrapeProductHunt() {
   try {
-    const url = 'https://www.producthunt.com/frontend/graphql';
     const query = `{ posts(first: 10, order: VOTES) { edges { node { name tagline votesCount url } } } }`;
-    const res = await fetch(url, {
+    const res = await fetch('https://www.producthunt.com/frontend/graphql', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
     });
     const json = await res.json();
-    return (json?.data?.posts?.edges ?? []).map(e => ({
-      source: 'producthunt',
-      title: e.node.name,
-      text: e.node.tagline,
-      score: e.node.votesCount,
-      comments: 0,
-      url: e.node.url,
-    }));
+    return (json?.data?.posts?.edges ?? []).map(e => ({ source: 'producthunt', title: e.node.name, text: e.node.tagline, score: e.node.votesCount, comments: 0 }));
   } catch (_) { return []; }
 }
 
 // ─── Idea Generator Agent ─────────────────────────────────────────────────────
 
 async function ideaGeneratorAgent(forumPosts) {
-  const digest = forumPosts
-    .slice(0, 30)
-    .map(p => `[${p.source}] "${p.title}" — ${p.text} (score: ${p.score})`)
-    .join('\n');
+  const digest = forumPosts.slice(0, 30).map(p => `[${p.source}] "${p.title}" — ${p.text} (score: ${p.score})`).join('\n');
 
   const msg = await claude.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 3000,
-    messages: [
-      {
-        role: 'user',
-        content: `You are a market research analyst specializing in B2B SaaS and AI agents.
+    messages: [{
+      role: 'user',
+      content: `You are a market research analyst specializing in B2B SaaS and AI agents.
 
 Forum data:
 ${digest}
 
 Generate 5 specific AI agent product ideas based on real pain points visible in this data.
 
-For EACH idea you MUST provide ALL fields with substantive content (no empty strings):
-
+For EACH idea provide ALL fields with substantive content (no empty strings):
 {
   "name": "Product name",
-  "agent_type": "specific type of AI agent (e.g. document processing agent, outreach automation agent)",
+  "agent_type": "specific type of agent",
   "priority": "HIGH" | "MEDIUM" | "LOW",
   "build_complexity": "LOW" | "MEDIUM" | "HIGH",
-  "confidence_score": <number 0-100>,
-  "problem": "One clear sentence describing the exact pain point",
-  "icp": "Specific job title + company type + company size (e.g. Project controllers at mid-market construction firms $10M-$100M revenue)",
-  "current_workaround": "How users solve this today manually (be specific)",
-  "market_signal": "Why this is validated now — market size, trend, regulation, or competitive gap",
-  "sources": ["list", "of", "sources", "seen", "in", "forum", "data"]
+  "confidence_score": <0-100>,
+  "problem": "Exact pain point in one sentence",
+  "icp": "Job title + company type + company size",
+  "current_workaround": "How users solve this manually today",
+  "market_signal": "Why this is validated now",
+  "sources": ["source1", "source2"]
 }
 
-Rules for build_complexity:
-- LOW: single API integration, simple document parsing, straightforward automation
-- MEDIUM: multi-step workflow, 2-3 integrations, moderate NLP
-- HIGH: complex orchestration, custom ML, deep ERP integrations, real-time processing
+build_complexity rules: LOW=single integration/simple parsing, MEDIUM=multi-step/2-3 integrations, HIGH=complex orchestration/deep ERP/real-time.
 
-Respond as a JSON array only. Every field must be non-empty.`,
-      },
-    ],
+Respond as JSON array only. Every field must be non-empty.`,
+    }],
   });
 
   try {
-    const raw = msg.content[0].text.replace(/```json|```/g, '').trim();
-    return JSON.parse(raw);
-  } catch (_) {
-    return [];
-  }
+    return JSON.parse(msg.content[0].text.replace(/```json|```/g, '').trim());
+  } catch (_) { return []; }
 }
 
 // ─── Validator Agent ──────────────────────────────────────────────────────────
@@ -155,60 +152,52 @@ async function validatorAgent(ideas) {
   const msg = await claude.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 2000,
-    messages: [
-      {
-        role: 'user',
-        content: `You are an adversarial product critic reviewing AI agent product ideas.
+    messages: [{
+      role: 'user',
+      content: `You are an adversarial product critic.
 
-Ideas to review:
+Ideas:
 ${JSON.stringify(ideas, null, 2)}
 
-For each idea, add these fields:
-- "risk": main failure risk in one specific sentence
+For each idea add:
+- "risk": main failure risk (one specific sentence)
 - "verdict": "ship" | "pivot" | "kill"
-- "adjusted_confidence": your honest 0-100 score (be skeptical — most ideas deserve 60-80, not 90+)
+- "adjusted_confidence": honest 0-100 score (most ideas deserve 60-80, not 90+)
 
-Also: if any of these fields are empty or generic, fill them in with specific content:
-- icp, current_workaround, market_signal, build_complexity
+Also fill in any empty icp, current_workaround, market_signal, build_complexity fields.
 
-Return the full array with all fields added/updated, as JSON only.`,
-      },
-    ],
+Return full array as JSON only.`,
+    }],
   });
 
   try {
-    const raw = msg.content[0].text.replace(/```json|```/g, '').trim();
-    return JSON.parse(raw);
-  } catch (_) {
-    return ideas;
-  }
+    return JSON.parse(msg.content[0].text.replace(/```json|```/g, '').trim());
+  } catch (_) { return ideas; }
 }
 
 // ─── Ticket Formatter ─────────────────────────────────────────────────────────
 
-function formatTickets(ideas, date) {
+function formatReport(ideas, date) {
   const dateStr = date.toISOString().slice(0, 10);
   const shippable = ideas.filter(i => i.verdict !== 'kill' && i.adjusted_confidence >= 80);
 
+  const header = `🛠 DEV PIPELINE UPDATE — ${dateStr}\nAgent Store: New Opportunities Validated\nTimestamp: ${date.toISOString()}\n────────────────────────────────`;
+
   if (shippable.length === 0) {
-    return `⚠️ No confirmed problems today. Minimum source threshold not met.\nAction: No new tickets created. Monitor running normally.`;
+    return `${header}\n\n⚠️ No confirmed problems today. Minimum source threshold not met.\nAction: No new tickets created. Monitor running normally.`;
   }
 
-  const lines = [`📋 ${shippable.length} NEW TICKET(S) CREATED`];
-
-  shippable.forEach((idea, idx) => {
+  const tickets = shippable.map((idea, idx) => {
     const ticketId = `AGT-${dateStr}-${String(idx + 1).padStart(3, '0')}`;
-    const priorityIcon = idea.priority === 'HIGH' ? '🔴' : idea.priority === 'MEDIUM' ? '🟡' : '🟢';
-    const complexity = idea.build_complexity || 'MEDIUM';
-
-    lines.push(`
+    const priorityIcon = { HIGH: '🔴', MEDIUM: '🟡', LOW: '🟢' }[idea.priority] || '🔴';
+    return `
 ══════════════════════════════
 🎫 TICKET: ${ticketId}
 ──────────────────────────────
 Title: ${idea.name}
 Agent Type: ${idea.agent_type}
 Priority: ${priorityIcon} ${idea.priority}
-Build Complexity: ${complexity}
+Build Complexity: ${idea.build_complexity || 'MEDIUM'}
 Confidence Score: ${idea.adjusted_confidence}/100
 
 📝 Problem:
@@ -218,81 +207,70 @@ ${idea.problem}
 ⚠️ Current workaround: ${idea.current_workaround}
 📊 Market signal: ${idea.market_signal}
 ⚡ Risk: ${idea.risk}
-✅ Verdict: ${idea.verdict.toUpperCase()}
 
 🔗 Sources: ${(idea.sources || []).join(', ')}
-Forum Posts Supporting: ${idea.forum_posts_count || 3}
 
-Status: 🆕 NEW — Awaiting prioritization`);
+Status: 🆕 NEW — Awaiting prioritization`;
   });
 
-  lines.push(`\n────────────────────────────────\nAuto-generated by Agent Market Monitor\nOnly problems with independent cross-validation included`);
-  return lines.join('\n');
+  return `${header}\n\n📋 ${shippable.length} NEW TICKET(S) CREATED\n${tickets.join('\n')}\n\n────────────────────────────────\nAuto-generated by Agent Market Monitor\nOnly problems with independent cross-validation included`;
 }
 
-// ─── Orchestrator ─────────────────────────────────────────────────────────────
+// ─── Pipeline Orchestrator ────────────────────────────────────────────────────
 
-async function runPipeline(topic = 'construction finance automation') {
+const TOPIC = process.env.SCAN_TOPIC || 'construction finance automation';
+
+async function runPipeline() {
   const now = new Date();
-  console.log(`\n[orchestrator] Pipeline start: "${topic}" at ${now.toISOString()}`);
+  console.log(`[orchestrator] Starting pipeline at ${now.toISOString()}`);
 
-  console.log('[forum-scraper] Scraping Reddit, HN, HN Ask, ProductHunt...');
-  const posts = await forumScraperAgent(topic);
-  console.log(`[forum-scraper] Found ${posts.length} posts`);
+  const posts = await forumScraperAgent(TOPIC);
+  console.log(`[forum-scraper] ${posts.length} posts found`);
 
   if (posts.length < 5) {
-    return {
-      topic,
-      posts_analyzed: posts.length,
-      ideas: [],
-      report: '⚠️ No confirmed problems today. Minimum source threshold not met.\nAction: No new tickets created. Monitor running normally.',
-      generated_at: now.toISOString(),
-    };
+    const report = `🛠 DEV PIPELINE UPDATE — ${now.toISOString().slice(0, 10)}\nAgent Store: New Opportunities Validated\nTimestamp: ${now.toISOString()}\n────────────────────────────────\n\n⚠️ No confirmed problems today. Minimum source threshold not met.\nAction: No new tickets created. Monitor running normally.`;
+    console.log('[orchestrator] Not enough posts, skipping AI pass');
+    await sendTelegram(report);
+    return { posts_analyzed: posts.length, ideas: [], report };
   }
 
-  console.log('[idea-generator] Generating ideas...');
   const ideas = await ideaGeneratorAgent(posts);
-  console.log(`[idea-generator] Generated ${ideas.length} ideas`);
+  console.log(`[idea-generator] ${ideas.length} ideas generated`);
 
-  console.log('[validator] Validating and enriching ideas...');
   const validated = await validatorAgent(ideas);
-  console.log(`[validator] Done — ${validated.filter(i => i.verdict === 'ship').length} ideas passed`);
+  console.log(`[validator] ${validated.filter(i => i.verdict === 'ship').length} ideas passed`);
 
-  // tag each idea with post count from matching sources
-  validated.forEach(idea => {
-    const matchingSources = idea.sources || [];
-    idea.forum_posts_count = posts.filter(p => matchingSources.includes(p.source)).length;
-  });
+  const report = formatReport(validated, now);
+  console.log('[orchestrator] Sending to Telegram...');
+  await sendTelegram(report);
+  console.log('[orchestrator] Done');
 
-  const report = formatTickets(validated, now);
+  return { posts_analyzed: posts.length, ideas: validated, report };
+}
 
-  return {
-    topic,
-    posts_analyzed: posts.length,
-    ideas: validated,
-    report,
-    generated_at: now.toISOString(),
-  };
+// ─── Scheduler (runs at 9:00 and 10:00 UTC) ──────────────────────────────────
+
+function scheduleRuns() {
+  const RUN_HOURS = (process.env.RUN_HOURS || '9,10').split(',').map(Number);
+
+  setInterval(() => {
+    const now = new Date();
+    if (RUN_HOURS.includes(now.getUTCHours()) && now.getUTCMinutes() === 0) {
+      console.log(`[scheduler] Triggering pipeline at ${now.toISOString()}`);
+      runPipeline().catch(err => console.error('[scheduler] Pipeline error:', err.message));
+    }
+  }, 60 * 1000); // check every minute
+
+  console.log(`[scheduler] Watching for UTC hours: ${RUN_HOURS.join(', ')}`);
 }
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
 
-app.get('/health', (_, res) => res.json({ status: 'ok' }));
+app.get('/health', (_, res) => res.json({ status: 'ok', topic: TOPIC }));
 
 app.get('/run', async (req, res) => {
-  const topic = req.query.topic || 'construction finance automation';
   try {
-    const result = await runPipeline(topic);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/run', async (req, res) => {
-  const { topic = 'construction finance automation' } = req.body;
-  try {
-    const result = await runPipeline(topic);
+    const result = await runPipeline();
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -300,10 +278,9 @@ app.post('/run', async (req, res) => {
 });
 
 app.get('/report', async (req, res) => {
-  const topic = req.query.topic || 'construction finance automation';
   try {
-    const result = await runPipeline(topic);
-    res.type('text').send(`🛠 DEV PIPELINE UPDATE — ${new Date().toISOString().slice(0, 10)}\nAgent Store: New Opportunities Validated\nTimestamp: ${result.generated_at}\n────────────────────────────────\n\n${result.report}`);
+    const result = await runPipeline();
+    res.type('text').send(result.report);
   } catch (err) {
     res.status(500).send(`Error: ${err.message}`);
   }
@@ -313,9 +290,6 @@ app.get('/report', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`agent-market-site running on http://localhost:${PORT}`);
-  console.log(`Endpoints:`);
-  console.log(`  GET /run?topic=construction+finance`);
-  console.log(`  GET /report?topic=construction+finance`);
-  console.log(`  GET /health`);
+  console.log(`agent-market-site running on port ${PORT}`);
+  scheduleRuns();
 });

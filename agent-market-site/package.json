@@ -1,7 +1,7 @@
 {
   "name": "agent-market-site",
   "version": "1.0.0",
-  "description": "Multi-agent forum monitor that generates and validates AI agent product ideas",
+  "description": "Forum monitor → AI idea generator → Telegram bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
