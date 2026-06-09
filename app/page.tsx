@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import Link from 'next/link';
+import TeamSection from '@/components/TeamSection';
 
 export default function Home() {
   return (
@@ -29,6 +30,7 @@ export default function Home() {
           </AccordionItem>
         </Accordion>
       </section>
+      <TeamSection />
       <section className="py-20 bg-gray-100 w-full">
         <h2 className="text-3xl font-semibold">Get Your Free Risk Scan</h2>
         <form className="max-w-md mx-auto mt-6">
